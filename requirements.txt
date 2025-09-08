@@ -1,6 +1,10 @@
 streamlit
-pandas
+pandas==2.2.2
+numpy>=1.26
 matplotlib
+yfinance>=0.2.36
 scikit-learn
 lightgbm
-yfinance
+PyPortfolioOpt==1.5.5
+cvxpy
+scipy
