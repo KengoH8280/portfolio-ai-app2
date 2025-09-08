@@ -13,7 +13,7 @@ Original file is located at
 # ============================================
 
 # 0) ライブラリ
-!pip -q install yfinance PyPortfolioOpt numpy pandas scikit-learn lightgbm
+#!pip -q install yfinance PyPortfolioOpt numpy pandas scikit-learn lightgbm
 
 # 1) Imports & 設定
 import warnings, numpy as np, pandas as pd, matplotlib.pyplot as plt, yfinance as yf
@@ -375,46 +375,16 @@ if SAVE_CSV:
         pd.DataFrame({"date":nav.index, "nav":nav.values}).to_csv(f"{name.lower()}_nav.csv", index=False)
     print("Saved: allocations_table.csv, model_nav.csv, (spy/qqq/vt)_nav.csv")
 
-# ============================================
-# 9月ポートフォリオの図示 + モデル指標ダッシュボード
-# （完成版コードの“最後に”追加して実行）
-# ============================================
+# ============================================================
+# 最新の次月ポートフォリオ + 総合レポート（ベンチ比較・リスク指標）
+# ＊完成版コードの一番最後にこのセルを追加／置き換え
+# ============================================================
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from pandas.tseries.offsets import MonthEnd
 
-# ---- 1) 直近の「9月」を特定し、配分を取得 ----
-alloc_sep = alloc_table.copy()
-alloc_sep["Month"] = pd.to_datetime(alloc_sep["Month"]).dt.to_period("M").dt.to_timestamp("M")
-
-# 直近の9月（9月が無ければ最も近い9月を探す）
-sep_months = sorted([m for m in alloc_sep["Month"].unique() if pd.Timestamp(m).month == 9])
-if len(sep_months) == 0:
-    raise RuntimeError("9月の配分が見つかりませんでした（期間が短い可能性）。")
-
-target_month = sep_months[-1]  # 直近の9月
-alloc_sep_latest = (
-    alloc_sep.loc[alloc_sep["Month"] == target_month]
-    .set_index("Ticker")[["Forecast_m","Forecast_a","Weight"]]
-    .sort_values("Weight", ascending=False)
-)
-
-print(f"=== {target_month.strftime('%Y-%m')} のポートフォリオ（{METHOD.upper()}）===\n")
-display(alloc_sep_latest.style.format({"Forecast_m":"{:.4f}","Forecast_a":"{:.2%}","Weight":"{:.2%}"}))
-
-# 図示（水平バー）
-plt.figure(figsize=(8,5))
-alloc_sep_latest["Weight"].sort_values().plot(kind="barh")
-plt.title(f"Portfolio Weights — {target_month.strftime('%Y-%m')}")
-plt.xlabel("Weight")
-plt.grid(True, axis="x")
-plt.show()
-
-# CSV保存（任意）
-alloc_sep_latest.reset_index().to_csv(f"portfolio_{target_month.strftime('%Y-%m')}.csv", index=False)
-print(f"Saved: portfolio_{target_month.strftime('%Y-%m')}.csv")
-
-# ---- 2) モデル指標をまとめて表示 ----
+# ---------- 0) ユーティリティ ----------
 def cagr(nav, freq=12):
     years = len(nav)/freq
     return (nav.iloc[-1]/nav.iloc[0])**(1/years) - 1
@@ -425,85 +395,128 @@ def max_dd(nav):
     return float(dd.min())
 
 def sharpe(nav, rf_annual=0.0):
-    rets = nav.pct_change().dropna()
-    mu, sd = rets.mean(), rets.std()
-    return ((((1+mu)**12 - 1) - rf_annual) / (sd*np.sqrt(12))) if sd>0 else np.nan
-
-def ann_vol(nav):
     r = nav.pct_change().dropna()
-    return float(r.std() * np.sqrt(12))
+    mu, sd = r.mean(), r.std()
+    return ((((1+mu)**12 - 1) - rf_annual)/(sd*np.sqrt(12))) if sd>0 else np.nan
 
 def sortino(nav, rf_annual=0.0):
     r = nav.pct_change().dropna()
     dr = r[r < 0]
     dd = dr.std()
     if dd == 0: return np.nan
-    mu = r.mean()
-    ex_annual = (1+mu)**12 - 1 - rf_annual
-    return float(ex_annual / (dd*np.sqrt(12)))
+    ex_annual = (1+r.mean())**12 - 1 - rf_annual
+    return float(ex_annual/(dd*np.sqrt(12)))
 
-# 月次勝率・ベンチ勝率
+def ann_vol(nav):
+    r = nav.pct_change().dropna()
+    return float(r.std()*np.sqrt(12))
+
+def calmar(nav):
+    dd = max_dd(nav)
+    return np.nan if dd == 0 else cagr(nav)/abs(dd)
+
+# ---------- 1) 「最新の次月」用の配分（直近月末の予測→翌月に適用） ----------
+# pred_store は「その月末の情報で作った予測」を格納している想定
+last_m = sorted(pred_store.keys())[-1]                     # 直近の予測月（＝直近月末）
+apply_month = (pd.Timestamp(last_m) + MonthEnd(1))         # 実運用ではその翌月に適用
+tickers = list(m_prices.columns)
+
+latest_df = compute_weights_for_month(
+    last_m, method=METHOD, top_n=TOP_N, max_w=MAX_W,
+    m_prices=m_prices, pred_store=pred_store, tickers=tickers
+).reindex(tickers)
+
+print(f"=== 次月ポートフォリオ（{last_m.strftime('%Y-%m')} 月末で作成 → {apply_month.strftime('%Y-%m')} に適用想定 / {METHOD.upper()}）===\n")
+display(latest_df.sort_values("Weight", ascending=False).style.format(
+    {"Forecast_m":"{:.4f}", "Forecast_a":"{:.2%}", "Weight":"{:.2%}"}
+))
+
+# 図示（水平バー）
+plt.figure(figsize=(8,5))
+latest_df["Weight"].sort_values().plot(kind="barh")
+plt.title(f"Next-Month Weights — built at {last_m.strftime('%Y-%m')}-end / apply {apply_month.strftime('%Y-%m')}")
+plt.xlabel("Weight")
+plt.grid(True, axis="x")
+plt.tight_layout()
+plt.show()
+
+# CSV保存（任意）
+latest_df.reset_index().rename(columns={"index":"Ticker"}).to_csv(
+    f"portfolio_next_{apply_month.strftime('%Y-%m')}.csv", index=False
+)
+print(f"Saved: portfolio_next_{apply_month.strftime('%Y-%m')}.csv")
+
+# ---------- 2) 総合レポート（モデル・ベンチ比較・リスク指標） ----------
 model_ret_m = model_nav.pct_change().dropna()
-spy_ret_m   = None
+
+# ベンチ（あるものだけ使う）
+benches = {}
 if "SPY" in m_prices.columns:
-    spy_ret_m = m_prices["SPY"].pct_change().dropna()
-qqq_ret_m = None
+    benches["SPY"] = (1 + m_prices["SPY"].pct_change().fillna(0)).cumprod()
 if "QQQ" in m_prices.columns:
-    qqq_ret_m = m_prices["QQQ"].pct_change().dropna()
+    benches["QQQ"] = (1 + m_prices["QQQ"].pct_change().fillna(0)).cumprod()
+if "VT" in m_prices.columns:
+    benches["VT"]  = (1 + m_prices["VT"].pct_change().fillna(0)).cumprod()
 
-win_rate = (model_ret_m > 0).mean()
+# 勝率・ベンチ勝率
+hit_ratio = (model_ret_m > 0).mean()
+beat_rates = {}
+irates = {}
+for name, bnav in benches.items():
+    bret = bnav.pct_change().dropna()
+    df_cmp = pd.concat([model_ret_m, bret], axis=1, join="inner")
+    df_cmp.columns = ["model","bench"]
+    beat_rates[name] = (df_cmp["model"] > df_cmp["bench"]).mean()
+    # 情報比（IR）
+    diff = df_cmp["model"] - df_cmp["bench"]
+    irates[name] = diff.mean()/diff.std()*np.sqrt(12) if diff.std()>0 else np.nan
 
-vs_spy = np.nan
-if spy_ret_m is not None:
-    df_cmp = pd.concat([model_ret_m, spy_ret_m], axis=1, join="inner")
-    df_cmp.columns = ["model","spy"]
-    vs_spy = (df_cmp["model"] > df_cmp["spy"]).mean()
-
-# 平均ターンオーバー（リバランス月のみで概算）
-wide_w = (alloc_table
-          .pivot_table(index="Month", columns="Ticker", values="Weight", aggfunc="last")
+# ターンオーバー（リバランス月のみ概算）
+wide_w = (alloc_table.pivot_table(index="Month", columns="Ticker", values="Weight", aggfunc="last")
           .sort_index())
-# 四半期 or 月次の実際のリバランス月を抽出
 if REBALANCE.lower().startswith("q"):
     reb_months = [m for m in wide_w.index if pd.Timestamp(m).month in (3,6,9,12)]
 else:
     reb_months = list(wide_w.index)
 wide_rb = wide_w.loc[reb_months].fillna(0.0)
-turnovers = (wide_rb.diff().abs().sum(axis=1) * 0.5).dropna()
+turnovers = (wide_rb.diff().abs().sum(axis=1)*0.5).dropna()
 avg_turnover = float(turnovers.mean()) if len(turnovers)>0 else np.nan
 
-# 指標の集計
-metrics = {
-    "Period": f"{model_nav.index[0].strftime('%Y-%m')} → {model_nav.index[-1].strftime('%Y-%m')}",
-    "CAGR": f"{cagr(model_nav):.2%}",
-    "MaxDD": f"{max_dd(model_nav):.2%}",
-    "Sharpe": f"{sharpe(model_nav):.2f}",
-    "Sortino": f"{sortino(model_nav):.2f}",
-    "Ann.Vol": f"{ann_vol(model_nav):.2%}",
-    "Hit Ratio (monthly)": f"{win_rate:.1%}",
-    "Avg Turnover / RB": f"{avg_turnover:.2%}",
-}
-if spy_ret_m is not None:
-    metrics["Beat SPY (monthly)"] = f"{vs_spy:.1%}"
+# 追加の健全性チェック
+r = model_ret_m
+best_m  = float(r.max()) if len(r) else np.nan
+worst_m = float(r.min()) if len(r) else np.nan
+skew    = float(r.skew()) if len(r) else np.nan
+kurt    = float(r.kurt()) if len(r) else np.nan
 
-# 参考：ベンチのCAGRも併記
-if spy_ret_m is not None:
-    spy_nav = (1 + spy_ret_m).cumprod()
-    metrics["SPY CAGR"] = f"{cagr(spy_nav):.2%}"
-if qqq_ret_m is not None:
-    qqq_nav = (1 + qqq_ret_m).cumprod()
-    metrics["QQQ CAGR"] = f"{cagr(qqq_nav):.2%}"
+# レポート出力
+print("\n=== Model Report ===")
+print(f"Period                 : {model_nav.index[0].strftime('%Y-%m')} → {model_nav.index[-1].strftime('%Y-%m')}")
+print(f"CAGR                   : {cagr(model_nav):.2%}")
+print(f"Max Drawdown           : {max_dd(model_nav):.2%}")
+print(f"Sharpe Ratio           : {sharpe(model_nav):.2f}")
+print(f"Sortino Ratio          : {sortino(model_nav):.2f}")
+print(f"Annual Volatility      : {ann_vol(model_nav):.2%}")
+print(f"Calmar Ratio           : {calmar(model_nav):.2f}")
+print(f"Hit Ratio (monthly)    : {hit_ratio:.1%}")
+print(f"Avg Turnover / RB      : {avg_turnover:.2%}")
+if benches:
+    for name in benches:
+        print(f"Beat {name} (monthly)  : {beat_rates[name]:.1%}   |   Information Ratio vs {name}: {irates[name]:.2f}")
+print(f"Best Month             : {best_m:.2%}")
+print(f"Worst Month            : {worst_m:.2%}")
+print(f"Skew / Kurtosis        : {skew:.2f} / {kurt:.2f}")
 
-print("\n=== Model Metrics ===")
-for k,v in metrics.items():
-    print(f"{k:20s}: {v}")
+# 参考：ベンチCAGR併記
+for name, bnav in benches.items():
+    print(f"{name} CAGR              : {cagr(bnav):.2%}")
 
-# 参考：9月の上位採用銘柄だけもう一枚（Weight>0）
-top_only = alloc_sep_latest[alloc_sep_latest["Weight"]>0]
+# ---------- 3) “アクティブ銘柄だけ” もう一枚 ----------
+top_only = latest_df[latest_df["Weight"]>0]
 if not top_only.empty:
     plt.figure(figsize=(8,4))
     plt.bar(top_only.index, top_only["Weight"].values)
-    plt.title(f"Active Positions — {target_month.strftime('%Y-%m')} (Weight>0)")
+    plt.title(f"Active Positions — apply {apply_month.strftime('%Y-%m')} (Weight>0)")
     plt.ylabel("Weight")
     plt.xticks(rotation=45, ha="right")
     plt.grid(True, axis="y")
@@ -622,4 +635,10 @@ print("・この配分は “t_pred 月末” のデータで作った来月向�
 print("・日次で運用したい場合は、月中に再実行して最新月を t_pred として再計算してください。")
 print("・TopNは単純で攻め、Hybridはレジーム&ボラ調整込みで安定寄りです。")
 
-!jupyter nbconvert --to script your_notebook.ipynb
+#%%writefile requirements.txt
+#streamlit
+#pandas
+#matplotlib
+#scikit-learn
+#lightgbm
+#yfinance
